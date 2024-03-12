@@ -1,3 +1,4 @@
+
 #include "my_dcn_im2col.h"
 #include <cstdio>
 #include <algorithm>
@@ -5,9 +6,9 @@
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
-#define align_threads (1024)
+#define align_thread (1024)
 #define CUDA_KERNEL_LOOP(index,n) \
-      for (int index; index < n; index += blockDim.x*gridDim.x)
+      for (int index=blockIdx.x * blockDim.x + threadIdx.x; index < n; index += blockDim.x*gridDim.x)
 
 __device__ float bilinear_interpolation(const float inh, const float inw, const int height, const int width, const float *input)
 {
@@ -34,7 +35,7 @@ __device__ float bilinear_interpolation(const float inh, const float inw, const 
 
 __device__ float grad_offset_weight(const float inh, const float inw, const int height, const int width, const float * input, const int weight_kind)
 {
-    // weight_kind = 0 时为对offset_x 求导， weight_kind = 1 时为对offset_y 求导
+    // weight_kind = 0 时为对offset_y 求导， weight_kind = 1 时为对offset_x 求导
     const int h_floor = floor(inh);
     const int w_floor = floor(inw);
     const int h_upper = h_floor + 1;
@@ -167,8 +168,9 @@ __global__ void my_dcn_im2col_forward_cuda(const int threadTotalNum,
             // float* input_ = input + batch_ * channel * height * width + channel_ * ( height_out * width_out ) + input_height * width_out + input_width ;
             const float inh = height_ + offset_h;
             const float inw = width_ + offset_w; 
-            float st = bilinear_interpolation(inh, inw, height, width, input);
+            float st = bilinear_interpolation(inh, inw, height, width, input_);
             *output_ = st;
+            printf("*output_=%f \n",*output_);
         }
             // }
         //}
@@ -201,12 +203,12 @@ __global__ void  my_dcn_backward_cuda_for_input(
         const int channel_ = (index / height_out / width_out/ kernel_w / kernel_h) % channels;
         const int batch_ = (index / height_out / width_out/ kernel_w / kernel_h / channels) % batch;
         const float *grad_back_ = grad_back + (((batch_ * channels + channel_ ) * kernel_h+ kernel_h_) * kernel_w + kernel_w_) * height_out * width_out + height_ * width_out + width_;
-        const float *offset_h = offset + ((batch_ * channels + channel_ )* 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_)* height_out * width_out + height_ * width_out + width_;
-        const float *offset_w = offset + ((batch_ * channels + channel_ )* 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_+1)* height_out * width_out + height_ * width_out + width_;
+        const float *offset_h = offset + (batch_ * 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_)* height_out * width_out + height_ * width_out + width_;
+        const float *offset_w = offset + (batch_ * 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_+1)* height_out * width_out + height_ * width_out + width_;
         float *input_grad_ = input_grad + (batch_ * channels + channel_)*height* width;
 
-        const int width_input = width_ * stride_w + kernel_w_ * (dilation_w-1) + 1;
-        const int height_input = height_ * stride_h + kernel_h_ * (dilation_h-1) + 1;
+        const int width_input = width_ * stride_w + kernel_w_ * dilation_w - pad_w;
+        const int height_input = height_ * stride_h + kernel_h_ * dilation_h - pad_h;
         const float width_plus_offset = width_input + *offset_w;
         const float height_plus_offset = height_input + *offset_h;
 
@@ -274,14 +276,14 @@ __global__ void  my_dcn_backward_cuda_for_offset(
         const int channel_ = (index / height_out / width_out/ kernel_w / kernel_h) % channels;
         const int batch_ = (index / height_out / width_out/ kernel_w / kernel_h / channels) % batch;
         const float *grad_back_ = grad_back + (((batch_ * channels + channel_ ) * kernel_h+ kernel_h_) * kernel_w + kernel_w_) * height_out * width_out + height_ * width_out + width_;
-        const float *offset_h = offset + ((batch_ * channels + channel_ )* 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_)* height_out * width_out + height_ * width_out + width_;
-        const float *offset_w = offset + ((batch_ * channels + channel_ )* 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_+1)* height_out * width_out + height_ * width_out + width_;
+        const float *offset_h = offset + (batch_ * 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_)* height_out * width_out + height_ * width_out + width_;
+        const float *offset_w = offset + (batch_ * 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_ + 1)* height_out * width_out + height_ * width_out + width_;
         
-        float *offset_grad_h = offset_grad + ((batch_ * channels + channel_ )* 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_)* height_out * width_out + height_ * width_out + width_;
-        float *offset_grad_w = offset_grad + ((batch_ * channels + channel_ )* 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_ + 1)* height_out * width_out + height_ * width_out + width_;
+        float *offset_grad_h = offset_grad + (batch_ * 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_)* height_out * width_out + height_ * width_out + width_;
+        float *offset_grad_w = offset_grad + (batch_ * 2 * kernel_h * kernel_w + 2*kernel_h_ * kernel_w_ + 1)* height_out * width_out + height_ * width_out + width_;
 
-        const int width_input = width_ * stride_w + kernel_w_ * (dilation_w-1) + 1;
-        const int height_input = height_ * stride_h + kernel_h_ * (dilation_h-1) + 1;
+        const int width_input = width_ * stride_w + kernel_w_ * dilation_w - pad_w;
+        const int height_input = height_ * stride_h + kernel_h_ * dilation_h - pad_h;
         const float width_plus_offset = width_input + *offset_w;
         const float height_plus_offset = height_input + *offset_h;
 
@@ -308,9 +310,17 @@ void my_dcn_im2col_forward(cudaStream_t stream,
                             float *output)
 {
     const int threadTotalNum = batch * channels * kernel_h * kernel_w * height_out *  width_out;
-    const int blockNum =  (threadTotalNum + align_threads-1) / align_threads + 1;
-
-    my_dcn_im2col_forward_cuda<<<blockNum, align_threads, 0, stream>>>(threadTotalNum, input, offset, 
+    const int blockNum =  (threadTotalNum + align_thread-1) / align_thread + 1;
+    //const int threadTotalNum,
+//                                            const float *input, const *float offset,
+//                                            const int batch, const int channels, const int height, const int width,
+//                                            const int channels_out, const int kernel_h,const int kernel_w,
+//                                            const int height_out, const int width_out,
+//                                            const int stride_h, const int stride_w,
+//                                            const int pad_h, const int pad_w,
+//                                            const int dilation_h, const int dilation_w,
+//                                            const float *output
+    my_dcn_im2col_forward_cuda<<<blockNum, align_thread, 0, stream>>>(threadTotalNum, input, offset, 
                                                                       batch, channels, height, width,
                                                                       channels_out, kernel_h, kernel_w,
                                                                       height_out, width_out, 
@@ -333,8 +343,8 @@ void my_dcn_backward_for_input(cudaStream_t stream,
                                float * input_grad)
 {
     const int threadTotalNum = batch * channels * kernel_h * kernel_w * height_out *  width_out;
-    const int blockNum = (threadTotalNum + align_threads-1) / align_threads + 1;
-    my_dcn_backward_cuda_for_input<<<blockNum, align_threads, 0, stream>>>
+    const int blockNum = (threadTotalNum + align_thread-1) / align_thread + 1;
+    my_dcn_backward_cuda_for_input<<<blockNum, align_thread, 0, stream>>>
                                 (
                                 threadTotalNum,
                                 grad_back,
@@ -361,8 +371,8 @@ void my_dcn_backward_for_offset(cudaStream_t stream,
                                float * offset_grad)
 {
     const int threadTotalNum = batch * channels * 2*kernel_h * kernel_w * height_out *  width_out;
-    const int blockNum = (threadTotalNum + align_threads-1) / align_threads + 1;
-    my_dcn_backward_cuda_for_offset<<<blockNum, align_threads, 0, stream>>>
+    const int blockNum = (threadTotalNum + align_thread-1) / align_thread + 1;
+    my_dcn_backward_cuda_for_offset<<<blockNum, align_thread, 0, stream>>>
                                 (
                                 threadTotalNum,
                                 grad_back,
